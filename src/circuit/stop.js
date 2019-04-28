@@ -1,5 +1,12 @@
 'use strict'
 
+const wrtc = require('wrtc')
+const SimplePeer = require('simple-peer')
+const isNode = require('detect-node')
+const toPull = require('stream-to-pull-stream')
+const pull = require('pull-stream/pull')
+const drain = require('pull-stream/sinks/drain')
+const Pushable = require('pull-pushable')
 const setImmediate = require('async/setImmediate')
 
 const EE = require('events').EventEmitter
@@ -47,8 +54,33 @@ class Stop extends EE {
       msg.srcPeer.addrs.forEach((addr) => peerInfo.multiaddrs.add(addr))
       const newConn = new Connection(sh.rest())
       newConn.setPeerInfo(peerInfo)
-      setImmediate(() => this.emit('connection', newConn))
-      callback(newConn)
+
+      const channel = new SimplePeer({wrtc: isNode ? wrtc : null})
+      const dstConn = new Connection(toPull.duplex(channel))
+
+      var p = Pushable()
+
+      pull(
+        p,
+        newConn,
+        drain(data => {
+          log('Read signal from circuit connection')
+          channel.signal(JSON.parse(data))
+        })
+      )
+
+      // dstConn.setInnerConn(conn)
+      channel.on('signal', (signal) => {
+        log('Writing signal to circuit connection')
+        p.push(JSON.stringify(signal))
+      })
+
+      channel.on('connect', () => {
+        log('Connected!')
+        setImmediate(() => this.emit('connection', dstConn))
+        callback(dstConn)
+      })
+      
     })
   }
 }
