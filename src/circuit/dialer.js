@@ -1,5 +1,12 @@
 'use strict'
 
+const wrtc = require('wrtc')
+const SimplePeer = require('simple-peer')
+const isNode = require('detect-node')
+const toPull = require('stream-to-pull-stream')
+const pull = require('pull-stream/pull')
+const drain = require('pull-stream/sinks/drain')
+const Pushable = require('pull-pushable')
 const once = require('once')
 const PeerId = require('peer-id')
 const waterfall = require('async/waterfall')
@@ -68,22 +75,42 @@ class Dialer {
     const relay = addr[0] === '/' ? null : multiaddr(addr[0])
     const peer = multiaddr(addr[1] || addr[0])
 
-    const dstConn = new Connection()
-    setImmediate(
-      this._dialPeer.bind(this),
-      peer,
-      relay,
-      (err, conn) => {
+    // const dstConn = new Connection()
+    return new Promise((resolve, reject) => {
+      this._dialPeer(peer, relay, (err, conn) => {
         if (err) {
           log.err(err)
+          reject(err)
           return cb(err)
         }
 
-        dstConn.setInnerConn(conn)
-        cb(null, dstConn)
-      })
+        const channel = new SimplePeer({initiator: true, wrtc: isNode ? wrtc : null})
+        const dstConn = new Connection(toPull.duplex(channel))
 
-    return dstConn
+        var p = Pushable()
+
+        pull(
+          p,
+          conn,
+          drain(data => {
+            log('Read signal from circuit connection')
+            channel.signal(JSON.parse(data))
+          })
+        )
+
+        // dstConn.setInnerConn(conn)
+        channel.on('signal', (signal) => {
+          log('Writing signal to circuit connection')
+          p.push(JSON.stringify(signal))
+        })
+
+        channel.on('connect', () => {
+          log('Connected!')
+          resolve(dstConn)
+          cb(null, dstConn)
+        })
+      })
+    })
   }
 
   /**
